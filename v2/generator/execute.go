@@ -114,19 +114,25 @@ func assembleGoFile(w io.Writer, f *File) {
 	w.Write(f.Body.Bytes())
 }
 
-func importsWrapper(src []byte) ([]byte, error) {
+func prepareImportsWrapper(options *Options) func([]byte) ([]byte, error) {
 	opt := imports.Options{
 		Comments:   true,
 		TabIndent:  true,
 		TabWidth:   8,
-		FormatOnly: true, // Disable the insertion and deletion of imports
+		FormatOnly: !options.EnableImportInsertionAndDeletion,
 	}
-	return imports.Process("", src, &opt)
+	return func(src []byte) ([]byte, error) {
+		return imports.Process("", src, &opt)
+	}
 }
 
 func NewGoFile() *DefaultFileType {
+	return NewGoFileWithOptions(&Options{})
+}
+
+func NewGoFileWithOptions(options *Options) *DefaultFileType {
 	return &DefaultFileType{
-		Format:   importsWrapper,
+		Format:   prepareImportsWrapper(options),
 		Assemble: assembleGoFile,
 	}
 }

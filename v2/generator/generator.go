@@ -174,9 +174,19 @@ type Context struct {
 	parser *parser.Parser
 }
 
+type Options struct {
+	EnableImportInsertionAndDeletion bool
+}
+
 // NewContext generates a context from the given parser, naming systems, and
 // the naming system you wish to construct the canonical ordering from.
 func NewContext(p *parser.Parser, nameSystems namer.NameSystems, canonicalOrderName string) (*Context, error) {
+	return NewContextWithOptions(p, nameSystems, canonicalOrderName, &Options{})
+}
+
+// NewContextWithOptions generates a context from the given parser, naming systems, and
+// the naming system you wish to construct the canonical ordering from.
+func NewContextWithOptions(p *parser.Parser, nameSystems namer.NameSystems, canonicalOrderName string, options *Options) (*Context, error) {
 	universe, err := p.NewUniverse()
 	if err != nil {
 		return nil, err
@@ -187,7 +197,7 @@ func NewContext(p *parser.Parser, nameSystems namer.NameSystems, canonicalOrderN
 		Universe: universe,
 		Inputs:   p.UserRequestedPackages(),
 		FileTypes: map[string]FileType{
-			GoFileType: NewGoFile(),
+			GoFileType: NewGoFileWithOptions(options),
 		},
 		parser: p,
 	}
