@@ -17,8 +17,8 @@ limitations under the License.
 package codetags
 
 import (
-	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -144,301 +144,139 @@ func RawValues(enabled bool) ParseOption {
 }
 
 const (
-	stBegin           = "stBegin"
-	stTag             = "stTag"
-	stMaybeArgs       = "stMaybeArgs"
-	stArg             = "stArg"
-	stArgEndOfToken   = "stArgEndOfToken"
-	stMaybeValue      = "stMaybeValue"
-	stValue           = "stValue"
-	stMaybeComment    = "stMaybeComment"
-	stTrailingSlash   = "stTrailingSlash"
-	stTrailingComment = "stTrailingComment"
+	stTag        = "stTag"
+	stMaybeArgs  = "stMaybeArgs"
+	stArg        = "stArg"
+	stMaybeValue = "stMaybeValue"
+	stValue      = "stValue"
 )
 
 func parseTag(input string, opts parseOpts) (TypedTag, error) {
-	var startTag, endTag *TypedTag // both ends of the chain when parsing chained tags
-
-	tag := bytes.Buffer{}   // current tag name
-	var args []Arg          // all tag arguments
-	value := bytes.Buffer{} // current tag value
-	var valueType ValueType // current value type
-	var hasValue bool       // true if the tag has a value
-
-	cur := Arg{}          // current argument accumulator
-	buf := bytes.Buffer{} // string accumulator
+	var startTag, endTag *TypedTag
 
 	// These are defined outside the loop to make errors easier.
-	s := scanner{buf: []rune(input)}
+	s := newLexer("+" + input)
 	var incomplete bool
 
-	saveInt := func() error {
-		s := buf.String()
-		cur.Value = s
-		cur.Type = ArgTypeInt
-		args = append(args, cur)
-		cur = Arg{}
-		buf.Reset()
-		return nil
-	}
-	saveString := func() {
-		s := buf.String()
-		cur.Value = s
-		cur.Type = ArgTypeString
-		args = append(args, cur)
-		cur = Arg{}
-		buf.Reset()
-	}
-	saveBoolOrString := func() {
-		s := buf.String()
-		if s == "true" || s == "false" {
-			cur.Value = s
-			cur.Type = ArgTypeBool
-		} else {
-			cur.Value = s
-			cur.Type = ArgTypeString
-		}
-		args = append(args, cur)
-		cur = Arg{}
-		buf.Reset()
-	}
-	saveName := func() {
-		cur.Name = buf.String()
-		buf.Reset()
-	}
-	saveTag := func() error {
-		usingNamedArgs := false
-		for i, arg := range args {
-			if (usingNamedArgs && arg.Name == "") || (!usingNamedArgs && arg.Name != "" && i > 0) {
-				return fmt.Errorf("can't mix named and positional arguments")
-			}
-			if arg.Name != "" {
-				usingNamedArgs = true
-			}
-		}
-		if !usingNamedArgs && len(args) > 1 {
-			return fmt.Errorf("multiple arguments must use 'name: value' syntax")
-		}
-
-		newTag := &TypedTag{Name: tag.String(), Args: args}
-		if startTag == nil {
-			startTag = newTag
-			endTag = newTag
-		} else {
-			endTag.ValueTag = newTag
-			endTag.ValueType = ValueTypeTag
-			endTag = newTag
-		}
-		args = nil // Reset to nil instead of empty slice
-		tag.Reset()
-		return nil
-	}
-	saveValue := func() {
-		endTag.Value = value.String()
-		if opts.rawValues {
-			endTag.ValueType = ValueTypeRaw
-			return
-		}
-		endTag.ValueType = valueType
-		if valueType == ValueTypeString && (endTag.Value == "true" || endTag.Value == "false") {
-			endTag.ValueType = ValueTypeBool
-		}
-	}
-	st := stBegin
+	st := stTag
 parseLoop:
-	for r := s.peek(); r != EOF; r = s.peek() {
+	for s.peek().r != EOF {
 		switch st {
-		case stBegin:
-			switch {
-			case unicode.IsSpace(r):
-				s.next()
-				continue
-			case isIdentBegin(r):
-				st = stTag
-			default:
-				break parseLoop
-			}
 		case stTag:
 			switch {
-			case isIdentBegin(r):
-				ident, err := s.nextIdent(isTagNameInterior)
-				if err != nil {
-					return TypedTag{}, err
+			case s.peek().r == TAG_NAME:
+				tagName := s.next().value
+				newTag := &TypedTag{Name: tagName}
+				if startTag == nil {
+					startTag = newTag
+					endTag = startTag
+				} else {
+					endTag.ValueTag = newTag
+					endTag.ValueType = ValueTypeTag
+					endTag = newTag
 				}
-				tag.WriteString(ident)
 				st = stMaybeArgs
 			default:
 				break parseLoop
 			}
 		case stMaybeArgs:
 			switch {
-			case r == '(':
+			case s.peek().r == '(':
 				s.next()
 				incomplete = true
 				st = stArg
-			case r == '=':
+			case s.peek().r == '=':
+				if opts.rawValues {
+					endTag.ValueType = ValueTypeRaw
+				}
 				s.next()
-				hasValue = true
 				st = stValue
-			case unicode.IsSpace(r):
-				s.next()
-				st = stMaybeComment
 			default:
 				break parseLoop
 			}
 		case stArg:
-			switch {
-			case unicode.IsSpace(r):
-				s.next()
-				continue
-			case r == ')':
-				s.next()
-				incomplete = false
-				st = stMaybeValue
-			case r == '-' || r == '+' || unicode.IsDigit(r):
-				number, err := s.nextNumber()
-				if err != nil {
-					return TypedTag{}, err
-				}
-				buf.WriteString(number)
-				if err := saveInt(); err != nil {
-					return TypedTag{}, err
-				}
-				st = stArgEndOfToken
-			case r == '"' || r == '`':
-				str, err := s.nextString()
-				if err != nil {
-					return TypedTag{}, err
-				}
-				buf.WriteString(str)
-				saveString()
-				st = stArgEndOfToken
-			case isIdentBegin(r):
-				str, err := s.nextIdent(isIdentInterior)
-				if err != nil {
-					return TypedTag{}, err
-				}
-				buf.WriteString(str)
-				r = s.peek()
-				switch {
-				case r == ',' || r == ')' || unicode.IsSpace(r):
-					saveBoolOrString()
-					st = stArgEndOfToken
-				case r == ':':
-					s.next()
-					saveName()
-					st = stArg
-				}
-			default:
-				break parseLoop
+			if endTag == nil {
+				return TypedTag{}, fmt.Errorf("unexpected parser state: expected tag to exist")
 			}
-		case stArgEndOfToken:
 			switch {
-			case unicode.IsSpace(r):
-				s.next()
-				continue
-			case r == ',':
-				s.next()
-				st = stArg
-			case r == ')':
+			case s.peek().r == ')': // 0 args
 				s.next()
 				incomplete = false
 				st = stMaybeValue
+			case s.peek2().r == ')': // 1 positional arg
+				value := s.next()
+				valueType := toArgType(value.r)
+				if valueType == "unknown" {
+					return TypedTag{}, fmt.Errorf("unknown argument value type %q", value.value)
+				}
+				arg := Arg{Value: value.value, Type: valueType}
+				endTag.Args = append(endTag.Args, arg)
+
+				s.next() // consume )
+				incomplete = false
+				st = stMaybeValue
+			case s.peek().r == IDENTIFIER: // named args
+				key := s.next()
+				if s.next().r != ':' {
+					return TypedTag{}, fmt.Errorf("expected ':' after argument name %q", key.value)
+				}
+				value := s.next()
+				valueType := toArgType(value.r)
+				if valueType == "unknown" {
+					return TypedTag{}, fmt.Errorf("unknown argument value type %q", value.value)
+				}
+				arg := Arg{Name: key.value, Value: value.value, Type: valueType}
+				endTag.Args = append(endTag.Args, arg)
+
+				switch {
+				case s.peek().r == ',':
+					s.next()
+					st = stArg
+				case s.peek().r == ')':
+					s.next()
+					incomplete = false
+					st = stMaybeValue
+				default:
+					break parseLoop
+				}
 			default:
 				break parseLoop
 			}
 		case stMaybeValue:
 			switch {
-			case r == '=':
+			case s.peek().r == '=':
+				if opts.rawValues {
+					endTag.ValueType = ValueTypeRaw
+				}
 				s.next()
-				hasValue = true
 				st = stValue
-			case unicode.IsSpace(r):
-				s.next()
-				st = stMaybeComment
 			default:
 				break parseLoop
 			}
 		case stValue:
 			switch {
 			case opts.rawValues: // When enabled, consume all remaining chars
-				value.WriteRune(s.next())
-			case r == '+' && isIdentBegin(s.peekN(1)): // tag value
-				s.next() // consume +
-				if err := saveTag(); err != nil {
-					return TypedTag{}, err
-				}
+				endTag.Value = input[s.peek().pos-1:]
+				return *startTag, nil
+			case s.peek().r == TAG_NAME: // tag value
 				st = stTag
-			case r == '-' || r == '+' || unicode.IsDigit(r):
-				number, err := s.nextNumber()
-				valueType = ValueTypeInt
-				if err != nil {
-					return TypedTag{}, err
-				}
-				value.WriteString(number)
-				st = stMaybeComment
-			case r == '"' || r == '`':
-				str, err := s.nextString()
-				if err != nil {
-					return TypedTag{}, err
-				}
-				value.WriteString(str)
-				valueType = ValueTypeString
-				st = stMaybeComment
-			case isIdentBegin(r):
-				str, err := s.nextIdent(isIdentInterior)
-				if err != nil {
-					return TypedTag{}, err
-				}
-				value.WriteString(str)
-				valueType = ValueTypeString
-				st = stMaybeComment
+			case slices.Contains([]rune{IDENTIFIER, STRING, NUMBER, BOOLEAN}, s.peek().r):
+				t := s.next()
+				endTag.Value = t.value
+				endTag.ValueType = toValueType(t.r)
+				st = stTag
 			default:
 				break parseLoop
 			}
-		case stMaybeComment:
-			switch {
-			case unicode.IsSpace(r):
-				s.next()
-				continue
-			case r == '/':
-				s.next()
-				incomplete = true
-				st = stTrailingSlash
-			default:
-				break parseLoop
-			}
-		case stTrailingSlash:
-			switch {
-			case r == '/':
-				s.next()
-				incomplete = false
-				st = stTrailingComment
-			default:
-				break parseLoop
-			}
-		case stTrailingComment:
-			s.next()
-			s.pos = len(s.buf)
-			break parseLoop
 		default:
-			return TypedTag{}, fmt.Errorf("unexpected internal parser error: unknown state: %s at position %d", st, s.pos)
+			return TypedTag{}, fmt.Errorf("unexpected internal parser error: unknown state: %s at position %d", st, s.peek().pos)
 		}
 	}
-	if s.peek() != EOF {
-		return TypedTag{}, fmt.Errorf("unexpected character %q at position %d", s.next(), s.pos)
+	if s.peek().r != EOF {
+		return TypedTag{}, fmt.Errorf("unexpected token %s(%s) at position %d", runeString(s.peek().r), s.peek().value, s.peek().pos)
 	}
 	if incomplete {
 		return TypedTag{}, fmt.Errorf("unexpected end of input")
-	}
-	if err := saveTag(); err != nil {
-		return TypedTag{}, err
-	}
-	if hasValue {
-		saveValue()
-	}
-	if startTag == nil {
-		return TypedTag{}, fmt.Errorf("unexpected internal parser error: no tags parsed")
 	}
 	return *startTag, nil
 }

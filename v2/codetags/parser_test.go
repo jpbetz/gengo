@@ -475,7 +475,7 @@ func TestParse(t *testing.T) {
 				return
 			}
 			if !reflect.DeepEqual(parsed, tc.expect) {
-				t.Errorf("Parsed tag doesn't match expected.\nExpected: %#v\nGot: %#v", tc.expect, parsed)
+				t.Errorf("Parsed tag doesn't match expected.\nExpected: %#v\n     Got: %#v", tc.expect.String(), parsed.String())
 			}
 
 			// round-trip testing
